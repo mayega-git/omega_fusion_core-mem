@@ -1,0 +1,17 @@
+/target
+.env*
+.venv_name
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log   
+.DS_Store
+.idea/
+.vscode/
+*.swp   
+*.swo
+*.bak
+*.tmp       
+ram_agent_env

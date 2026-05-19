@@ -1,0 +1,24 @@
+# Secrets
+ram-agent/.env
+.env.*
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+api/ram_agent_env/
+.venv/
+.venv_name
+
+# Rust
+ram-agent/target/
+
+# Éditeurs
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*.tmp

@@ -1,0 +1,153 @@
+mod memory;
+mod swap;
+mod network;
+mod nbd;
+mod remote_ram;
+
+use std::thread;
+use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
+use crate::network::{Agent, start_listener};
+use crate::swap::SwapWatcher;
+
+fn main() {
+    println!("=== RAM Agent ===\n");
+
+    nbd::init();
+
+    // ── Test mmap sur RAM distante ──
+    let fichier = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/mnt/remote-ram/test_data")
+        .expect("Impossible d'ouvrir le fichier distant");
+
+    let taille: usize = 1024 * 1024;
+    fichier.set_len(taille as u64).expect("ftruncate échoué");
+
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            taille,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fichier.as_raw_fd(),
+            0,
+        )
+    };
+
+    if ptr == libc::MAP_FAILED {
+        println!("[mmap] ÉCHEC");
+    } else {
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, taille) };
+        slice[0] = 42;
+        slice[1000] = 99;
+        println!("[mmap] Écriture OK : ptr[0]={}, ptr[1000]={}", slice[0], slice[1000]);
+        unsafe { libc::munmap(ptr, taille); }
+        println!("[mmap] RAM distante fonctionnelle !");
+    }
+    // ── Fin test mmap ──
+
+    let agent = Agent::new(7878, vec!["192.168.123.100".to_string()]);
+    println!("[main] IP locale : {}", agent.ip);
+
+    let watcher = Arc::new(Mutex::new(SwapWatcher::new(120)));
+
+    let agent_shared = Arc::new(Mutex::new(Agent::new(7878, vec!["192.168.92.147".to_string()])));
+    let agent_listener = Arc::clone(&agent_shared);
+    let watcher_listener = Arc::clone(&watcher);
+    thread::spawn(move || {
+        start_listener(agent_listener, watcher_listener, 7878);
+    });
+    thread::sleep(Duration::from_secs(1));
+
+    let mut vms_ram = agent.ram_vms_proxmox(
+        "192.168.123.101",
+        "monitoring",
+        "f7c448c2-1870-445f-8a43-4b8bfd587701",
+    );
+    vms_ram.sort_by(|a, b| b.cmp(a));
+    println!("[main] RAM manquante VMs (décroissant) : {:?}", vms_ram);
+
+    loop {
+        let info = match memory::read_meminfo() {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("[main] Erreur mémoire : {}", e);
+                thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+        };
+
+        let available_mb = info.available_kb / 1024;
+        println!("[main] RAM : {} Mo dispo ({:.1}% utilisée)", available_mb, info.used_pct);
+
+        if agent.ram_saturee() {
+            let nb_swaps = watcher.lock().unwrap().nb_suivis();
+            if nb_swaps >= 1 {
+                println!("[main] Swap déjà actif, pas de nouvelle création");
+            } else {
+                println!("[main] RAM SATURÉE — recherche de swap distant...");
+
+                let offres = agent.ram_peers();
+                let paires = agent.apparier_offres(&offres, &vms_ram, 500, 5);
+
+                if paires.is_empty() {
+                    println!("[main] Aucune paire possible");
+                }
+
+                for (donneur_ip, taille) in &paires {
+                    println!("[main] Demande {} Mo à {}", taille, donneur_ip);
+
+                    match agent.demander_swap(donneur_ip, *taille) {
+                        Ok((port, swap_id)) => {
+                            match agent.configurer_swap_local(donneur_ip, port, &swap_id, *taille) {
+                                Ok(distant) => {
+                                    println!("[main] Swap distant ACTIF : {} sur {}", distant.device, distant.donneur_ip);
+                                    let mut w = watcher.lock().unwrap();
+                                    w.ajouter(&distant.swap_id, &distant.device, &distant.donneur_ip, 7878);
+                                    break;
+                                }
+                                Err(e) => println!("[main] Config locale échouée : {}", e),
+                            }
+                        }
+                        Err(e) => println!("[main] Demande refusée par {} : {}", donneur_ip, e),
+                    }
+                }
+            }
+        }
+
+        {
+            let mut w = watcher.lock().unwrap();
+            let a_liberer = w.verifier();
+            for suivi in &a_liberer {
+                println!("[main] Libération de {} (vide depuis 2 min)", suivi.swap_id);
+
+                let distant = nbd::SwapDistant {
+                    swap_id: suivi.swap_id.clone(),
+                    donneur_ip: suivi.donneur_ip.clone(),
+                    port_nbd: 0,
+                    device: suivi.device.clone(),
+                    taille_mb: 0,
+                };
+                let _ = nbd::deconnecter(&distant);
+
+                let req = network::RpcRequest::new(
+                    "liberer_swap",
+                    serde_json::json!({ "swap_id": suivi.swap_id }),
+                    3,
+                );
+                let _ = network::envoyer(&suivi.donneur_ip, suivi.port_rpc, &req);
+            }
+
+            if w.nb_suivis() > 0 {
+                println!("[watcher] {} swap(s) sous surveillance", w.nb_suivis());
+            }
+        }
+
+        thread::sleep(Duration::from_secs(10));
+    }
+}

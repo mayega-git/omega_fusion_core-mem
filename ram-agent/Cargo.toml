@@ -1,0 +1,31 @@
+[package]
+name = "ram-agent"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+nix = { version = "0.27" , features = ["mount","fs"] }
+log = "0.4"
+env_logger = "0.11"
+dotenvy = "0.15"
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
+
+[package.metadata.deb]
+maintainer = "mayegabalock@example.com"
+depends = "python3, python3-venv"
+section = "utility"
+priority = "optional"
+
+assets = [
+    ["target/release/ram-agent", "usr/bin/", "755"],
+    ["api", "opt/ram-agent/api", "755"],
+    ["systemd/ram-api.service", "etc/systemd/system/", "644"],
+    ["systemd/ram-agent.service", "etc/systemd/system/", "644"]
+]
+
+maintainer-scripts = "scripts"

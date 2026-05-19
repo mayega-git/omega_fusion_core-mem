@@ -1,0 +1,25 @@
+#!/bin/bash
+set -e
+
+echo "=== Installation des dépendances ==="
+
+# Python + venv
+apt-get update
+apt-get install -y python3 python3-venv
+
+# Création virtualenv
+python3 -m venv /opt/ram-agent/venv
+
+# Installer dépendances Python
+/opt/ram-agent/venv/bin/pip install --upgrade pip
+/opt/ram-agent/venv/bin/pip install -r /opt/ram-agent/api/requirements.txt
+
+echo "=== Activation services ==="
+
+systemctl daemon-reload
+systemctl enable ram-api
+systemctl enable ram-agent
+systemctl start ram-api
+systemctl start ram-agent
+
+echo "=== Installation terminée ==="

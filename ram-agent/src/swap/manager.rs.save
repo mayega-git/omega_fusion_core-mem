@@ -1,0 +1,105 @@
+use crate::memory::MemInfo;
+use crate::swap::common::{SwapBlock, BASE_PATH};
+use crate::swap::{create, activate, desactivate, delete};
+
+pub struct SwapManager {
+    pub blocs: Vec<SwapBlock>,
+    pub min_available_mb: u64,   // MemAvailable minimum pour créer (2 Go)
+    pub max_total_swap_mb: u64,  // Limite totale de swap en RAM (3 Go)
+    pub taille_bloc_mb: u64,     // Taille d'un bloc (ex: 512 Mo)
+}
+
+impl SwapManager {
+    pub fn new(taille_bloc_mb: u64) -> Self {
+        SwapManager {
+            blocs: Vec::new(),
+            min_available_mb: 2048,    // 2 Go
+            max_total_swap_mb: 3072,   // 3 Go
+            taille_bloc_mb,
+        }
+    }
+
+    /// Total de swap en RAM actuellement géré
+    pub fn total_swap_mb(&self) -> u64 {
+        self.blocs.iter().map(|b| b.taille_mb).sum()
+    }
+
+    /// Nombre de blocs actifs
+    pub fn nb_actifs(&self) -> usize {
+        self.blocs.iter().filter(|b| b.est_actif()).count()
+    }
+
+    /// Créer et activer un nouveau bloc
+    pub fn ajouter(&mut self) -> Result<(), String> {
+        // Vérifier la limite totale
+        if self.total_swap_mb() + self.taille_bloc_mb > self.max_total_swap_mb {
+            return Err(format!(
+                "Limite atteinte : {} Mo / {} Mo max",
+                self.total_swap_mb(), self.max_total_swap_mb
+            ));
+        }
+
+        // Créer le bloc
+        let mut bloc = create::create(self.taille_bloc_mb)?;
+
+        // Activer avec priorité basée sur le nombre de blocs
+        let priorite = (10 - self.blocs.len() as i32).max(1);
+        activate::activate(&mut bloc, priorite)?;
+
+        println!("[manager] Bloc {} créé et activé ({} Mo)", bloc.id, bloc.taille_mb);
+        self.blocs.push(bloc);
+        Ok(())
+    }
+
+    /// Désactiver et supprimer le bloc le plus ancien
+    pub fn retirer(&mut self) -> Result<(), String> {
+        if self.blocs.is_empty() {
+            return Err("Aucun bloc à retirer".to_string());
+        }
+
+        // Retirer le premier (le plus ancien)
+        let bloc = self.blocs.remove(0);
+        let id = bloc.id.clone();
+        delete::delete(bloc)?;
+
+        println!("[manager] Bloc {} supprimé", id);
+        Ok(())
+    }
+
+    /// Afficher l'état de tous les blocs
+    pub fn lister(&self) {
+        if self.blocs.is_empty() {
+            println!("[manager] Aucun bloc de swap actif");
+            return;
+        }
+
+        println!("[manager] {} bloc(s), total {} Mo :", self.blocs.len(), self.total_swap_mb());
+        for bloc in &self.blocs {
+            let etat = if bloc.est_actif() { "ACTIF" } else { "INACTIF" };
+            println!("  - {} | {} Mo | {}", bloc.id, bloc.taille_mb, etat);
+        }
+    }
+
+    /// Logique de décision automatique
+    pub fn ajuster(&mut self, info: &MemInfo) {
+        let available_mb = info.available_kb / 1024;
+
+        // Assez de RAM disponible → on peut créer du swap
+        if available_mb > self.min_available_mb
+            && self.total_swap_mb() + self.taille_bloc_mb <= self.max_total_swap_mb
+        {
+            match self.ajouter() {
+                Ok(()) => {},
+                Err(e) => println!("[manager] Création refusée : {}", e),
+            }
+        }
+
+        // RAM trop basse et des blocs existent → on libère
+        if available_mb < self.min_available_mb / 2 && !self.blocs.is_empty() {
+            match self.retirer() {
+                Ok(()) => {},
+                Err(e) => println!("[manager] Suppression échouée : {}", e),
+            }
+        }
+    }
+}
