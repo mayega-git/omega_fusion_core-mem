@@ -1,5 +1,6 @@
 /target
 .env*
+!.env.example
 .venv_name
 .venv/
 __pycache__/
